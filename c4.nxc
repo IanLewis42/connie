@@ -1,0 +1,932 @@
+//c4.nxc
+//program for a robot that plays connect 4
+//Robot plays yellow, and goes second (may be OK going first...)
+
+//Motors
+#define SCANNER OUT_A   //Drives colour sensor up and down
+#define FEEDER OUT_B    //Drive counter feed mechanism
+#define WHEELS OUT_C    //Drives wheels
+
+//Sensors
+#define SWITCH S1       //User switch
+#define SWITCH_STATE Sensor(SWITCH)
+#define COLOUR S2       //Colour sensor
+#define END_SWITCH S3   //Switch to sense when we get to the end
+#define END_SWITCH_STATE Sensor(END_SWITCH)
+
+#define TRUE 1
+#define FALSE 0
+
+#define TWO_SCORE	100		//Values for getting a row (/column/diagonal) 2/3/4 pieces long
+#define THREE_SCORE	1000    //A bit arbitrary, but the idea is that 3 is a lot better than 2, and 4 is much much better!
+#define FOUR_SCORE	1000000
+
+#define col_step 320       //degrees to turn a the motors to move from one counter slot to the next
+#define row_step 280
+#define scan_offset 320     //x-distance between counter dispenser and scanning head
+#define HALF_WAY scan_col[3]
+#define TOLERANCE 5         //tolerance for APR
+
+
+int play_col[7];	//motor positions for wheel motor to go to to play a piece
+int scan_col[7];	//motor positions for wheel motor to go to to scan for a piece
+int scan_row[7];	//motor positions for scanner motor to go to to scan for a piece
+
+char board[7][6];	// 7 columns, 6 rows. R,Y or . (for empty).
+char fill_level[7];	// fill level for each column
+
+int bins[8];	//bins to hold number of rows(in any direction) of each length,
+                //so bins[3] holds the total number of rows of 3 counters.
+
+//tones to play while thinking. Don't know why I called them scan tones....
+int scantones[] = {TONE_C4, TONE_D4, TONE_E4, TONE_F4, TONE_G4, TONE_A4, TONE_B4, TONE_C5};
+
+char player;
+int column, best_move, moves;
+long int red_score, yellow_score;
+long int score, max_score, min_score, move_score, best_score;
+int yellow_wins = FALSE, red_wins = FALSE;
+int current_x, current_y;
+ColorSensorReadType csr;
+
+void display_board(void);
+long int get_score(char player);
+void play(char player, int column);
+void unplay(int column);
+void dispense(void);
+void PlayWinningTune(void);
+int scan(void);
+void really_play(int column);		//put piece in physical board
+void go_x(int x);
+void go_xy(int x, int y);
+void init(void);
+void GoHome(void);
+
+task go_x_task();
+task go_y_task();
+
+
+#define APR TRUE
+
+
+task main()
+{
+	int i,j,k;
+	
+    init();
+
+/*
+    for (i=0 ; i<6 ; i++)
+    {
+        go_xy(scan_col[i], scan_row[i]);
+        //Wait(100);
+    }
+
+    for (i=5 ; i>=0 ; i--)
+    {
+        go_xy(scan_col[i], scan_row[i]);
+        //Wait(100);
+    }
+
+
+    Stop(TRUE);
+ */
+
+
+    while(1)
+	{
+		//Human
+		if (player == 'R')
+		{
+			//ROBOT: 
+			//wait for button press, then scan for new piece 
+			//if we find one, switch player.
+			//if not, we go around again.
+			//if scan spots a red win, then we re-init and start again.
+			if (SWITCH_STATE)
+			{
+                if (scan() == 0)	//0 indicates success, i.e. we found a new red counter
+				{
+ 					PlayTone(TONE_C5,300);
+					Wait(300);
+					PlayTone(TONE_G5,200);
+					Wait(200);
+					
+					//if (current_y == scan_row[0])         //top and bottom positions can hit supports
+                    //    go_xy(current_x, scan_row[1]);  //if we play in column 0!
+                        
+					//if (current_y == scan_row[5])
+                    //    go_xy(current_x, scan_row[4]);
+
+                    red_score = get_score('R');	//check for win
+                    display_board();
+                    
+                    //while(1);
+                    
+                    if (red_wins)   //start again
+                    {
+                    	go_xy(scan_col[6],scan_row[0]);
+                        init();
+                    }
+
+					else player = 'Y';   //else switch player
+				}
+				else	//didn't find red counter
+				{
+					PlayTone(TONE_G4,300); //play fail tone
+					Wait(300);
+					PlayTone(TONE_C4,200);
+					Wait(200);
+				}
+			}
+		}		
+
+		else //Robot
+		{			
+			if (moves < 2)					//hard-coded first move
+			{
+				if (board[3][0] == '.')		//play col 3 if free, otherwise col 4
+				{
+					play('Y',3);			//put char in array 
+					really_play(3);			//put piece in physical board
+				}
+				else
+				{
+					play('Y',4);
+					really_play(4);
+				}
+            }
+			else     //analyse board, and decide what's the best move.
+			{			
+				best_score = -9999999;	//we're looking for a big positive number
+
+				for (i=0 ; i<7 ; i++)	//possible computer move
+				{
+                    PlayTone(scantones[i],150);   //play 'thinking' tones
+
+                    if (fill_level[i] < 6)	//column is not full
+					{
+						play('Y',i);		//make the computer move in the array
+											
+                        yellow_score = get_score('Y');
+                        if (yellow_wins)
+                        {
+                            unplay(i);      //undo computer move
+                            best_move = i;  //remember what we're supposed to do
+                            break;          //and get out.
+                        }
+
+                        max_score  = -9999999;	//min and max potential scores for a given computer move
+						min_score  =  9999999;					
+						
+						for(j=0 ; j<7 ; j++) //possible human move
+						{
+							if (fill_level[j] < 6)	//column is not full
+							{
+								play('R',j);	//make the human move
+                                
+                                red_score = get_score('R');	//see if it's good or not
+
+                                score = yellow_score - red_score;
+
+								if (score > max_score)		//keep track of the biggest and smallest we find
+									max_score = score;
+								if (score < min_score)
+									min_score = score;								
+								
+								unplay(j);	//undo the human move
+								
+                                if (red_wins) break;//if we see red winning here, bomb out and try the next column
+							}
+						}
+
+                        move_score = max_score + min_score;	//overall score for the move is the max + the min
+
+						if (move_score > best_score)	//if that's the biggest we've seen, remember it
+						{
+							best_score = move_score;
+							best_move = i;
+						}
+						unplay(i);	//undo the computer move
+					}
+				}
+
+                PlayTone(scantones[i],300);   //play last 'thinking' tone
+				play('Y',best_move);	//make the best move into the array
+				really_play(best_move); //and on the physical board
+			}
+
+            //GoHome();               //go back to the end and reset the motor count
+
+            player = 'R';			//switch player
+
+            yellow_score = get_score('Y');	//check for win
+			display_board();		        //update screen and play tune if required
+
+            if (yellow_wins)		       //if it's the end, then restart.
+			{
+   	            go_xy(scan_col[6],scan_row[0]);
+            	init();
+   	        }
+			
+        } //end of if (player == 'R') / else
+        
+	} //end of while(1)
+
+	Stop(TRUE);
+	
+}  //end of task(main)
+
+void play(char player, int column)
+{
+	board[column][fill_level[column]] = player;	//put player value in its correct place in array
+	fill_level[column]++;		//and increment fill level
+	moves++;
+}
+
+void unplay (int column)
+{
+	fill_level[column]--;		//decrement fill level
+	board[column][fill_level[column]] = '.';	//make location empty
+	moves--;
+}
+
+void display_board(void)
+{
+	int i,j;
+	string msg;
+	char temp;
+	
+	for (i=0 ; i<6 ; i++)
+	{
+		for (j=0 ; j<7 ; j++)
+		{
+         //sprintf(msg, "%c", board[j][i]);
+         temp = board[j][i];
+         TextOut(j*8, i*8, FlattenVar(temp) );//(msg, DRAW_OPT_NORMAL);
+		}
+	}
+
+	//Sounds
+	if (red_wins)
+    {
+        TextOut(0, 48, "RED WINS!", DRAW_OPT_NORMAL);
+        PlayWinningTune();
+    }
+    
+	if (yellow_wins)
+    {
+        TextOut(0, 48, "YELLOW WINS!", DRAW_OPT_NORMAL);
+        PlayWinningTune();
+    }
+    
+    if (moves == 42)
+    {
+        TextOut(0, 48, "DRAW!", DRAW_OPT_NORMAL);
+        PlayWinningTune();
+    }
+}
+
+void PlayWinningTune(void)
+{
+     PlayTone(TONE_C5,200);
+     Wait(200);
+	 PlayTone(TONE_E5,200);
+	 Wait(200);
+     PlayTone(TONE_G5,200);
+     Wait(200);
+	 PlayTone(TONE_C6,200);
+	 Wait(200);
+}
+
+
+//function get_score()
+// Requires: Player ('R' or 'Y')
+// Returns:  Score for the given player. Points allocated for rows (in any direction) of length 2,3,>=4
+//
+//Description:
+//For RED
+//for each row
+//start at left.
+//increment until you find RED. start count
+//count until you find NOT RED. increment 'bin' (for 2,3,4) [if 4, bomb out]
+//repeat for each column
+//repeat for / diagonal (diagonals are a little more complicated. See embedded comments)
+//repeat for \ diagonal
+
+long int get_score(char player)
+{
+	int x, y, count, empty_row = 6;
+	int start_x, start_y;
+	long int score=0;
+	char before, after,empty;
+
+	for (x=0 ; x<8 ; x++)
+		bins[x] = 0;
+	
+	//count horizontal groups
+	for (y=0 ; y<6 ; y++)	//go up the board
+	{
+		count = 0;
+        before = 'X';	//'null' value - corresponds to 'off the board' - we use this to check if a group can be extended.
+        empty = TRUE;
+        for (x=0 ; x<7 ; x++)	//and across each row
+		{
+            if (board[x][y] != '.') empty = FALSE;
+			if (board[x][y] == player)	//if we match, increment the group count
+				count++;
+			else
+			{                         	//if we don't,
+                if (count > 3)          //if it's 4 or more,
+                    bins[count]++;      //Remember that we had a line of 'count'
+                else                    //if it's 3 or fewer
+                {
+                    if (before == '.')  //check for 'open' ends
+                        bins[count]++;  //and remember that we had a line of 'count'
+                    after = board[x][y];//a line with 2 open ends counts double.
+                    if (after == '.')
+                        bins[count]++;
+                }
+                    
+                count = 0;				//and start again
+				before = board[x][y];   //remember value before group starts
+			}
+		}
+		if (empty == TRUE)	//entire row is empty, so we can stop looking.
+        {
+            //empty_row = y;
+            break;
+        }
+        if (count > 3 || before == '.')	//loop exit is the same as group end
+            bins[count]++;              //except we can't have a space after....
+	}
+	
+	//count vertical groups
+	for (x=0 ; x<7 ; x++)	//go across the board
+	{
+		count = 0;
+		before = 'X';
+		for (y=0 ; y<6 ; y++)//and up each column
+		{
+            if ((after = board[x][y]) == '.') break;
+            if (board[x][y] == player)	//if we match, increment the group count
+				count++;
+			else
+			{							//if we don't,
+                if (count > 3)          //if it's 4 or more,
+                    bins[count]++;      //Remember that we had a line of 'count'
+                else                    //if it's 3 or fewer
+                {
+                    //if (before == '.')    //can't have an empty space below a vertical line!
+                    //    bins[count]++;
+                    after = board[x][y];
+                    if (after == '.')
+                        bins[count]++;
+                    count = 0;
+                    before = board[x][y];
+                }
+			}
+		}
+        if (count > 3 || after == '.')   //can have '.' after if we broke early
+            bins[count]++;
+	}	
+
+
+	//count / diagonals
+	for (start_y = 5 ; start_y >= 0 ; start_y--)	//start top-left, and work down
+	{
+		count = 0;
+		y = start_y;
+		before = 'X';
+		for (x=0 ; x<7 ; x++)						//from each start point we go right (and up, later)
+		{
+			if (board[x][y] == player)	//if we match, increment the group count
+				count++;
+			else
+			{							//if we don't,
+                if (count > 3)          //if it's 4 or more,
+                    bins[count]++;      //Remember that we had a line of 'count'
+                else                    //if it's 3 or fewer
+                {
+                    if (before == '.')
+                        bins[count]++;
+                    after = board[x][y];
+                    if (after == '.')
+                        bins[count]++;
+                    count = 0;
+                    before = board[x][y];
+                }
+			}		
+			
+			y++;									//here's the going up bit
+			if (y>5) break;							//stop if we go off the top
+		}
+        if (count > 3 || before == '.')
+            bins[count]++;								//include whatever we were counting when we stopped
+	}
+
+	for (start_x = 1 ; start_x <7 ; start_x++)		//still counting / diagonals, now we need to work across the bottom
+	{
+		count = 0;
+		x = start_x;
+		before = 'X';
+		for (y=0 ; y<6 ; y++)
+		{
+			if (board[x][y] == player)	//if we match, increment the group count
+				count++;
+			else
+			{							//if we don't,
+                if (count > 3)          //if it's 4 or more,
+                    bins[count]++;      //Remember that we had a line of 'count'
+                else                    //if it's 3 or fewer
+                {
+                    if (before == '.')
+                        bins[count]++;
+                    after = board[x][y];
+                    if (after == '.')
+                        bins[count]++;
+                    count = 0;
+                    before = board[x][y];
+                }
+			}		
+			
+			x++;
+			if (x>6) break;
+		}
+        if (count > 3 || before == '.')
+    		bins[count]++;
+	}
+
+	
+    //count \ diagonals
+	for (start_y = 5 ; start_y >= 0 ; start_y--)	//start top right and work down
+	{
+		count = 0;
+		y = start_y;
+		before = 'X';
+		for (x=6 ; x>=0 ; x--)
+		{
+			if (board[x][y] == player)	//if we match, increment the group count
+				count++;
+			else
+			{							//if we don't,
+                if (count > 3)          //if it's 4 or more,
+                    bins[count]++;      //Remember that we had a line of 'count'
+                else                    //if it's 3 or fewer
+                {
+                    if (before == '.')
+                        bins[count]++;
+                    after = board[x][y];
+                    if (after == '.')
+                        bins[count]++;
+                    count = 0;
+                    before = board[x][y];
+                }
+			}		
+			
+			y++;
+			if (y>5) break;
+		}
+		if (count > 3 || before == '.')
+    		bins[count]++;
+	}
+
+	for (start_x = 5 ; start_x >=0 ; start_x--)		//and then right-to-left across the bottom.
+	{
+		count = 0;
+		x = start_x;
+		before = 'X';
+		for (y=0 ; y<6 ; y++)
+		{
+			if (board[x][y] == player)	//if we match, increment the group count
+				count++;
+			else
+			{							//if we don't,
+                if (count > 3)          //if it's 4 or more,
+                    bins[count]++;      //Remember that we had a line of 'count'
+                else                    //if it's 3 or fewer
+                {
+                    if (before == '.')
+                        bins[count]++;
+                    after = board[x][y];
+                    if (after == '.')
+                        bins[count]++;
+                    count = 0;
+                    before = board[x][y];
+                }
+			}		
+			
+			x--;
+			if (x<0) break;
+		}
+        if (count > 3 || before == '.')
+            bins[count]++;
+	}
+
+	score  = bins[2] * TWO_SCORE;		//add up up the score
+	score += bins[3] * THREE_SCORE;
+	score += (bins[4] + bins[5] + bins[6] + bins[7]) * FOUR_SCORE;
+
+	if (bins[4] || bins[5] || bins[6] || bins[7])
+		if (player == 'R')
+		{
+			red_wins = TRUE;
+			yellow_wins = FALSE;
+		}
+		else
+		{
+			yellow_wins = TRUE;
+			red_wins = FALSE;
+		}
+	else
+	{
+		red_wins = FALSE;
+		yellow_wins = FALSE;
+	}
+
+	//score += (rand() >> 11);	//add a random tweak. Should retun random value 0-15, so should only
+								//change decisions between otherwise equal scores
+	//score += Random(16);
+	return score;
+}
+
+
+int current_wheel_pos = 0;
+
+//ROBOT:
+void really_play(int column)
+{
+	go_x(play_col[column]);
+	
+	dispense();
+	
+	return;
+}
+
+void dispense()
+{
+   RotateMotor(FEEDER, 50, -180);
+   RotateMotor(FEEDER, 50, 180);
+   return;
+}
+
+
+//ROBOT:
+int scan()
+{
+	int i, found, start_col;
+	
+	found = FALSE;
+	
+	SetSensorColorFull(COLOUR);	//config sensors
+    csr.Port = COLOUR;
+
+    for (i=0 ; scan_col[i] > current_x ; i++);    //find the scan_col just past where we are
+
+    start_col = i;
+
+    if (i < 3)  //go downwards
+    {
+        for ( ; i>=0 ; i--)
+        {
+			if(fill_level[i] < 6)	//looking for a new piece, so don't bother with columns that were already full
+			{
+                go_xy(scan_col[i], scan_row[fill_level[i]] );	//go to the lowest free space in the next column
+
+                SysColorSensorRead(csr);						//read the sensor
+                if(csr.ColorValue == INPUT_REDCOLOR)			//if we've found red
+                {
+                     play('R',i);								//put the piece in the array
+                     break;										//and stop looking
+                }
+            }
+		}
+
+        if (i >= 0)	//found piece
+		{
+			SetSensorColorNone(COLOUR);	//sensor off
+            return 0;                   //success
+		}
+        else    //go back to where we were and work up
+        {
+            for (i=start_col+1 ; i<7 ; i++)
+            {
+    			if(fill_level[i] < 6)		//looking for a new piece, so don't bother with columns that were already full
+    			{
+                    go_xy(scan_col[i], scan_row[fill_level[i]] );	//go to the lowest free space in the next column
+
+                    SysColorSensorRead(csr);						//read the sensor
+                    if(csr.ColorValue == INPUT_REDCOLOR)			//if we've found red
+                    {
+                         play('R',i);								//put the piece in the array
+                         break;										//and stop looking
+                    }
+                }
+    		}
+
+            if (i < 7)	//found piece
+    		{
+    			SetSensorColorNone(COLOUR);	//sensor off
+                return 0;                   //success
+    		}
+            else
+            {
+                SetSensorColorNone(COLOUR);	//sensor off
+                GoHome();               //go back to the end and reset the motor count
+                return	1;	                //failure
+            }
+        }
+    }
+
+    else    // i>4, so go upwards
+    {
+        for ( ; i<7 ; i++)
+        {
+			if(fill_level[i] < 6)		//looking for a new piece, so don't bother with columns that were already full
+			{
+                go_xy(scan_col[i], scan_row[fill_level[i]] );	//go to the lowest free space in the next column
+
+                SysColorSensorRead(csr);						//read the sensor
+                if(csr.ColorValue == INPUT_REDCOLOR)			//if we've found red
+                {
+                     play('R',i);								//put the piece in the array
+                     break;										//and stop looking
+                }
+            }
+		}
+
+        if (i < 7)	//found piece
+		{
+			SetSensorColorNone(COLOUR);	//sensor off
+			return	0;	               //success
+		}
+		else    //go back to where we were and work down
+		{
+            GoHome();               //go back to the end and reset the motor count
+            for (i=start_col-1; i>=0 ; i--)
+            {
+    			if(fill_level[i] < 6)		//looking for a new piece, so don't bother with columns that were already full
+    			{
+                    go_xy(scan_col[i], scan_row[fill_level[i]] );	//go to the lowest free space in the next column
+
+                    SysColorSensorRead(csr);						//read the sensor
+                    if(csr.ColorValue == INPUT_REDCOLOR)			//if we've found red
+                    {
+                         play('R',i);								//put the piece in the array
+                         break;										//and stop looking
+                    }
+                }
+    		}
+
+            if (i >= 0)	//found piece
+    		{
+    			SetSensorColorNone(COLOUR);	//sensor off
+                return 0;                   //success
+    		}
+            else
+            {
+                SetSensorColorNone(COLOUR);	//sensor off
+                return	1;	                //failure
+            }
+        }
+    }	
+	
+	SetSensorColorNone(COLOUR);	//sensor off	
+	return 0;
+}
+
+#if APR
+
+void go_x(int x)
+{
+    int y;
+
+    //First check if we're going to crash into one of the board supports
+    if (x == play_col[0])
+    {
+        if (current_y == scan_row[0]) //avoid the board support!
+        {
+            y = scan_row[1];
+            PosRegSetAngle (SCANNER, y);
+            while (MotorTachoCount (SCANNER)<(y-TOLERANCE) ||
+                   MotorTachoCount (SCANNER)>(y+TOLERANCE) );   //wait for it to get close enough
+            current_y = y;
+        }
+        else if (current_y == scan_row[5]) //avoid the board support!
+        {
+            y = scan_row[4];
+            PosRegSetAngle (SCANNER, y);
+            while (MotorTachoCount (SCANNER)<(y-TOLERANCE) ||
+                   MotorTachoCount (SCANNER)>(y+TOLERANCE) );   //wait for it to get close enough
+            current_y = y;
+        }
+    }
+    
+    PosRegSetAngle (WHEELS, x); // Set APR target. APR firmware does the rest
+
+    while (MotorTachoCount (WHEELS)<(x-TOLERANCE) ||
+    MotorTachoCount (WHEELS)>(x+TOLERANCE) );   //wait for it to get close enough
+
+    current_x = x;
+}
+
+void go_xy(int x, int y)
+{
+     PosRegSetAngle (WHEELS, x); // Set APR target. APR firmware does the rest
+     PosRegSetAngle (SCANNER, y);
+
+    while (MotorTachoCount (WHEELS)<(x-TOLERANCE) ||
+         MotorTachoCount (WHEELS)>(x+TOLERANCE) );   //wait for it to get close enough
+
+    while (MotorTachoCount (SCANNER)<(y-TOLERANCE) ||
+         MotorTachoCount (SCANNER)>(y+TOLERANCE) );   //wait for it to get close enough
+         
+    current_x = x;
+    current_y = y;
+}
+
+#else	//not APR - old, probably doesn't work....
+int x_distance,y_distance,go_to_end;
+int x_moving,y_moving;
+void go_x(int x)
+{
+    x_distance = x - current_x;
+
+    #if 0
+    if (x == scan_col[6])
+    {
+        OnRev(WHEELS, 50);
+        while (!END_SWITCH_STATE);     //wait for switch to be pressed
+        Off(WHEELS);
+    }
+    else
+    {
+        RotateMotor(WHEELS, 50, -1*x_distance); //move
+    }
+    #else
+
+    if (x == scan_col[6])
+      go_to_end = TRUE;
+    else
+      go_to_end = FALSE;
+
+    if (x == play_col[0] && current_y == scan_row[0]) //avoid the board support!
+    {
+       y_distance = scan_row[1] - current_y;
+       y_moving = TRUE;
+       start go_y_task;
+       while (y_moving);
+       current_y = scan_row[1];
+    }
+
+    x_moving = TRUE;
+    start go_x_task;
+    while (x_moving);
+
+    #endif
+
+	current_x = x;
+
+    return;
+}
+
+void go_xy(int x, int y)
+{
+    x_distance = x - current_x;
+    y_distance = y - current_y;
+
+    #if 0
+    if (x == scan_col[6])
+    {
+        OnRev(WHEELS, 50);
+        while (!END_SWITCH_STATE);     //wait for switch to be pressed
+        Off(WHEELS);
+
+    }
+    else
+    {
+        RotateMotor(WHEELS, 50, -1*x_distance); //move
+    }
+
+
+    RotateMotor(SCANNER, 50, -1*y_distance); //move
+
+    #else
+    if (x == scan_col[6])
+      go_to_end = TRUE;
+    else
+      go_to_end = FALSE;
+
+    x_moving = TRUE;
+    start go_x_task;
+
+    y_moving = TRUE;
+    start go_y_task;
+
+    while (x_moving | y_moving);
+    #endif
+
+    current_x = x;
+	current_y = y;
+
+    return;
+}
+
+task go_x_task()
+{
+    if (go_to_end)
+    {
+        OnRev(WHEELS, 100);
+        while (!END_SWITCH_STATE);     //wait for switch to be pressed
+        Off(WHEELS);
+
+    }
+    else
+    {
+        RotateMotor(WHEELS, 100, -1*x_distance); //move
+    }
+    x_moving = FALSE;
+}
+
+task go_y_task()
+{
+    RotateMotor(SCANNER, 100, -1*y_distance); //move
+    y_moving = FALSE;
+}
+#endif
+
+
+void init(void)
+{
+    int i,j;
+    
+    for (i=0 ; i<7 ; i++)			//init array to empty
+	{
+		for (j=0 ; j<6 ; j++)
+		{
+            board[i][j] = '.'; //empty
+		}
+		fill_level[i] = 0;		//and fill levels to 0
+	}
+
+    #if APR
+    for (i=0 ; i<7 ; i++)       //init positions
+    {
+        play_col[i] = (6-i)*col_step + scan_offset;
+        scan_col[i] = (6-i)*col_step;
+        scan_row[i] = i*row_step*-1;
+    }
+    scan_row[6] = scan_row[5];  //just in case.....
+    #else
+    for (i=0 ; i<7 ; i++)       //init positions
+    {
+        play_col[i] = i*col_step;
+        scan_col[i] = i*col_step + scan_offset;
+        scan_row[i] = i*row_step;
+    }
+    #endif
+    
+    red_wins = FALSE;
+    yellow_wins = FALSE;
+    
+    moves = 0;
+
+	player = 'R';		//Red starts
+
+	display_board();
+	
+	SetSensor(SWITCH, SENSOR_TOUCH);
+	SetSensor(END_SWITCH, SENSOR_TOUCH);
+
+    OnRev(WHEELS, 100);             //start going left
+    while (!END_SWITCH_STATE);      //wait for switch to be pressed
+    Off(WHEELS);                    //stop!
+    
+    current_x = 0;
+
+    #if APR
+    PosRegEnable (SCANNER); // Enable positive regulation for colour sensor motor
+    PosRegSetMax (SCANNER, 75, 75); // Speed and acceleration limit
+
+    PosRegEnable (WHEELS); // Enable positive regulation for wheels motor
+    //PosRegSetMax (WHEELS, 75, 75); // Speed and acceleration limit
+    PosRegSetMax (WHEELS, 100, 100); // Speed and acceleration limit
+
+    SetMotorRegulationTime (10); // Speed up the regulation process
+	#endif
+
+    return;
+}
+
+void GoHome(void)
+{
+    OnRev(WHEELS, 100);             //start going left
+    while (!END_SWITCH_STATE);      //wait for switch to be pressed
+    Off(WHEELS);                    //stop!
+
+    current_x = 0;
+
+    #if APR
+    	PosRegEnable (WHEELS); // Reset positive regulation for panning motor- Port A
+	#endif
+}
